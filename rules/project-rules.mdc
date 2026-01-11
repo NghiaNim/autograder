@@ -1,0 +1,216 @@
+# Project Rules
+
+## Code Style
+
+- Minimal comments — self-documenting code
+- No separate `.md` docs — all documentation in `rules/`
+- Prefer building over explaining
+- TypeScript strict mode
+- Prefer `const` over `let`
+- Prefer early returns
+
+---
+
+## Validation
+
+All external input validated with Zod:
+
+```ts
+import { z } from "zod";
+
+// Define schema
+const InputSchema = z.object({
+  title: z.string().min(1),
+  points: z.number().int().positive(),
+});
+
+// Parse (throws) or safeParse (returns result)
+const result = InputSchema.safeParse(untrustedData);
+if (!result.success) {
+  // handle result.error
+}
+```
+
+---
+
+## Supabase Setup
+
+### Server Client (Route Handlers, Server Components, Actions)
+
+```ts
+// lib/supabase/server.ts
+import { createServerClient as createClient } from "@supabase/ssr";
+import { cookies } from "next/headers";
+
+export async function createServerClient() {
+  const cookieStore = await cookies();
+
+  return createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_KEY!,
+    {
+      cookies: {
+        getAll() {
+          return cookieStore.getAll();
+        },
+        setAll(cookiesToSet) {
+          cookiesToSet.forEach(({ name, value, options }) => {
+            cookieStore.set(name, value, options);
+          });
+        },
+      },
+    }
+  );
+}
+```
+
+### Browser Client (Client Components)
+
+```ts
+// lib/supabase/client.ts
+import { createBrowserClient } from "@supabase/ssr";
+
+export function createClient() {
+  return createBrowserClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  );
+}
+```
+
+### Usage Pattern
+
+```ts
+// In actions (server-side)
+import { createServerClient } from "@/lib/supabase/server";
+
+export async function getAssignment(id: string) {
+  const supabase = await createServerClient();
+  return supabase.from("assignments").select().eq("id", id).single();
+}
+```
+
+---
+
+## OpenRouter Setup
+
+### Client
+
+```ts
+// lib/openrouter/client.ts
+const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
+
+type ChatMessage = {
+  role: "system" | "user" | "assistant";
+  content: string;
+};
+
+type ChatRequest = {
+  model: string;
+  messages: ChatMessage[];
+  temperature?: number;
+  max_tokens?: number;
+};
+
+type ChatResponse = {
+  id: string;
+  choices: { message: { content: string } }[];
+};
+
+export const openrouter = {
+  async chat(req: ChatRequest): Promise<{ content: string }> {
+    const res = await fetch(`${OPENROUTER_BASE}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.OPENROUTER_KEY}`,
+      },
+      body: JSON.stringify(req),
+    });
+
+    if (!res.ok) {
+      throw new Error(`OpenRouter error: ${res.status}`);
+    }
+
+    const data: ChatResponse = await res.json();
+    return { content: data.choices[0].message.content };
+  },
+};
+```
+
+### Usage Pattern
+
+```ts
+import { openrouter } from "@/lib/openrouter/client";
+
+const response = await openrouter.chat({
+  model: "anthropic/claude-sonnet-4",
+  messages: [
+    { role: "system", content: "You are a grading assistant." },
+    { role: "user", content: prompt },
+  ],
+  temperature: 0.3,
+});
+
+const result = JSON.parse(response.content);
+```
+
+---
+
+## Environment Variables
+
+```
+# .env.local
+NEXT_PUBLIC_SUPABASE_URL=https://xxx.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=eyJ...
+SUPABASE_KEY=eyJ...  # service role key (server only)
+OPENROUTER_KEY=sk-or-...
+```
+
+- `NEXT_PUBLIC_*` — exposed to browser
+- Others — server only
+
+---
+
+## Project Structure
+
+```
+autograder/
+├── app/
+│   ├── api/                    # API routes
+│   │   └── [resource]/route.ts
+│   ├── teacher/                # Teacher pages
+│   │   └── assignments/
+│   │       ├── new/page.tsx
+│   │       └── [id]/report/page.tsx
+│   ├── student/                # Student pages
+│   │   └── assignments/
+│   │       └── [id]/page.tsx
+│   ├── layout.tsx
+│   └── page.tsx
+├── components/                 # Shared UI components
+│   ├── ui/                     # Primitives (button, input, etc.)
+│   └── [feature]/              # Feature-specific components
+├── lib/
+│   ├── actions/                # DB/API calls
+│   ├── services/               # Business logic
+│   ├── schemas/                # Zod schemas + types
+│   ├── supabase/               # Supabase clients
+│   ├── openrouter/             # OpenRouter client
+│   └── utils/                  # Pure helpers
+├── rules/                      # Project documentation
+└── public/
+```
+
+---
+
+## Conventions
+
+| Item | Convention |
+|------|------------|
+| Components | PascalCase (`AssignmentCard.tsx`) |
+| Utilities | camelCase (`formatDate.ts`) |
+| Schemas | PascalCase with Schema suffix (`AssignmentSchema`) |
+| Types | PascalCase, derived from schema |
+| API routes | lowercase with hyphens (`/api/assignments`) |
+| DB tables | snake_case (`student_scores`) |

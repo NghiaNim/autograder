@@ -1,0 +1,435 @@
+# Auto-Grader Design
+
+## Data Model
+
+### Tables
+
+```
+assignments
+├── id              uuid PK
+├── title           text
+├── description     text
+├── teacher_id      uuid FK → auth.users
+├── share_code      text UNIQUE (6-char code)
+├── created_at      timestamptz
+
+rubrics
+├── id              uuid PK
+├── assignment_id   uuid FK → assignments (1:1)
+├── criteria        jsonb[]  [{name, description, points, levels[]}]
+├── total_points    int
+├── updated_at      timestamptz
+
+students
+├── id              uuid PK
+├── name            text
+├── email           text UNIQUE (nullable)
+├── created_at      timestamptz
+
+submissions
+├── id              uuid PK
+├── assignment_id   uuid FK → assignments
+├── student_id      uuid FK → students
+├── problem_index   int
+├── whiteboard_data jsonb (strokes, image_url)
+├── submitted_at    timestamptz
+
+scores
+├── id              uuid PK
+├── submission_id   uuid FK → submissions
+├── rubric_id       uuid FK → rubrics
+├── points_earned   int
+├── feedback        text (internal, not shown to student)
+├── graded_at       timestamptz
+```
+
+### Relationships
+
+```
+teacher (auth.users)
+    │
+    └──< assignments >──┬── rubrics (1:1)
+                        │
+                        └──< submissions >── scores
+                                │
+                                └── students
+```
+
+### Row-Level Security
+
+```sql
+-- assignments: teacher owns
+CREATE POLICY "teachers own assignments"
+  ON assignments FOR ALL
+  USING (auth.uid() = teacher_id);
+
+-- submissions: anyone can insert (students anonymous)
+CREATE POLICY "anyone can submit"
+  ON submissions FOR INSERT
+  WITH CHECK (true);
+
+-- submissions: teacher can read own assignment submissions  
+CREATE POLICY "teachers read submissions"
+  ON submissions FOR SELECT
+  USING (
+    assignment_id IN (
+      SELECT id FROM assignments WHERE teacher_id = auth.uid()
+    )
+  );
+
+-- scores: same as submissions
+CREATE POLICY "teachers read scores"
+  ON scores FOR SELECT
+  USING (
+    submission_id IN (
+      SELECT s.id FROM submissions s
+      JOIN assignments a ON s.assignment_id = a.id
+      WHERE a.teacher_id = auth.uid()
+    )
+  );
+```
+
+---
+
+## API Routes
+
+### Assignments
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/assignments` | Create assignment + generate rubric |
+| GET | `/api/assignments/[id]` | Get assignment with rubric |
+| PATCH | `/api/assignments/[id]/rubric` | Update rubric |
+
+```ts
+// POST /api/assignments
+// Request
+{ title: string, description: string }
+
+// Response 201
+{ 
+  id: string,
+  title: string,
+  share_code: string,
+  rubric: { criteria: Criterion[], total_points: number }
+}
+```
+
+### Submissions
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/submissions` | Submit problem + trigger grading |
+| GET | `/api/assignments/[id]/submissions` | Get all submissions (teacher) |
+
+```ts
+// POST /api/submissions
+// Request
+{ 
+  assignment_id: string,
+  student_id: string,
+  problem_index: number,
+  whiteboard_data: { strokes: Stroke[], image_url?: string }
+}
+
+// Response 201
+{ 
+  id: string,
+  score: { points_earned: number, total_points: number }
+}
+```
+
+### Reports
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/assignments/[id]/report` | Aggregate scores per student |
+
+```ts
+// GET /api/assignments/[id]/report
+// Response
+{
+  assignment: { id, title, total_points },
+  students: [
+    { 
+      id: string,
+      name: string,
+      problems_completed: number,
+      total_score: number,
+      submitted_at: string
+    }
+  ]
+}
+```
+
+### Students
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/students` | Create/get student by name |
+
+```ts
+// POST /api/students
+// Request
+{ name: string }
+
+// Response 200/201
+{ id: string, name: string }
+```
+
+---
+
+## UI Routes
+
+### `/teacher/assignments/new`
+
+Create new assignment page.
+
+```
+┌─────────────────────────────────────┐
+│ Create Assignment                   │
+├─────────────────────────────────────┤
+│ Title: [________________]           │
+│                                     │
+│ Description:                        │
+│ [                                 ] │
+│ [                                 ] │
+│                                     │
+│ [Generate Rubric]                   │
+├─────────────────────────────────────┤
+│ Generated Rubric (editable)         │
+│ ┌─────────────────────────────────┐ │
+│ │ Criterion 1        [10 pts]    │ │
+│ │ [edit] [delete]                │ │
+│ ├─────────────────────────────────┤ │
+│ │ Criterion 2        [15 pts]    │ │
+│ │ [edit] [delete]                │ │
+│ └─────────────────────────────────┘ │
+│                                     │
+│ [+ Add Criterion]                   │
+│                                     │
+│ [Create Assignment]                 │
+└─────────────────────────────────────┘
+```
+
+Components:
+- `AssignmentForm` — title, description inputs
+- `RubricEditor` — editable criteria list
+- `CriterionCard` — single criterion with levels
+- `GenerateButton` — triggers LLM rubric generation
+
+---
+
+### `/teacher/assignments/[id]/report`
+
+Persistent grade report.
+
+```
+┌─────────────────────────────────────────────────┐
+│ Assignment: [Title]              Share: abc123  │
+│ Total Points: 100                               │
+├─────────────────────────────────────────────────┤
+│ Student Progress                    [Refresh]   │
+├───────────────┬──────────┬─────────┬────────────┤
+│ Student       │ Progress │ Score   │ Submitted  │
+├───────────────┼──────────┼─────────┼────────────┤
+│ Alice         │ 5/5 ✓    │ 87/100  │ 2 min ago  │
+│ Bob           │ 3/5      │ 45/60   │ in progress│
+│ Carol         │ 5/5 ✓    │ 92/100  │ 5 min ago  │
+└───────────────┴──────────┴─────────┴────────────┘
+```
+
+Components:
+- `ReportHeader` — assignment info, share code
+- `StudentTable` — sortable student list
+- `ProgressBadge` — completion indicator
+- `ScoreCell` — points with percentage
+
+---
+
+### `/student/assignments/[id]`
+
+Student assignment view.
+
+```
+┌─────────────────────────────────────────────────┐
+│ [Assignment Title]                              │
+│ ⚠️ AI feedback is disabled for this assignment │
+├─────────────────────────────────────────────────┤
+│ Problem 1 of 5                                  │
+│                                                 │
+│ [Problem description here]                      │
+│                                                 │
+├─────────────────────────────────────────────────┤
+│ ┌─────────────────────────────────────────────┐ │
+│ │                                             │ │
+│ │           WHITEBOARD CANVAS                 │ │
+│ │         (draw your work here)               │ │
+│ │                                             │ │
+│ └─────────────────────────────────────────────┘ │
+│ [Pen] [Eraser] [Clear]                          │
+├─────────────────────────────────────────────────┤
+│                              [Submit Problem]   │
+└─────────────────────────────────────────────────┘
+
+After submit:
+┌─────────────────────────────────────────────────┐
+│ Score: 8/10                                     │
+│                         [Next Problem →]        │
+└─────────────────────────────────────────────────┘
+```
+
+Components:
+- `AssignmentHeader` — title, feedback notice
+- `ProblemCard` — current problem display
+- `Whiteboard` — canvas for drawing work
+- `ToolBar` — pen, eraser, clear
+- `SubmitButton` — submit current problem
+- `ScoreDisplay` — shows earned points
+- `NavigationButtons` — next/prev problem
+
+---
+
+## LLM Integration
+
+### Rubric Generation
+
+System prompt:
+```
+You are an expert educator creating grading rubrics.
+Given an assignment, generate a detailed rubric with:
+- 3-5 criteria covering key skills
+- Each criterion has 4 levels (Excellent, Good, Developing, Beginning)
+- Point values that sum to a reasonable total (50-100)
+
+Respond in JSON format only.
+```
+
+User prompt:
+```
+Assignment Title: {title}
+
+Description:
+{description}
+
+Generate a grading rubric.
+```
+
+Response schema:
+```ts
+const RubricResponseSchema = z.object({
+  criteria: z.array(z.object({
+    name: z.string(),
+    description: z.string(),
+    points: z.number(),
+    levels: z.array(z.object({
+      name: z.enum(["Excellent", "Good", "Developing", "Beginning"]),
+      description: z.string(),
+      percentage: z.number(), // 100, 75, 50, 25
+    })),
+  })),
+  total_points: z.number(),
+});
+```
+
+---
+
+### Grading Submission
+
+System prompt:
+```
+You are grading a student's work against a rubric.
+Analyze the whiteboard submission and score each criterion.
+Be fair but rigorous. Students do NOT see your feedback.
+
+Respond in JSON format only.
+```
+
+User prompt:
+```
+## Rubric
+{rubric_json}
+
+## Problem
+{problem_description}
+
+## Student Work
+[Image of whiteboard submission]
+
+Grade this submission.
+```
+
+Response schema:
+```ts
+const GradeResponseSchema = z.object({
+  scores: z.array(z.object({
+    criterion_name: z.string(),
+    level: z.enum(["Excellent", "Good", "Developing", "Beginning"]),
+    points_earned: z.number(),
+    reasoning: z.string(),
+  })),
+  total_earned: z.number(),
+  overall_feedback: z.string(),
+});
+```
+
+---
+
+### Score Extraction Pattern
+
+```ts
+async function gradeSubmission(
+  submission: Submission,
+  rubric: Rubric,
+  problem: Problem
+) {
+  // 1. Build prompt with rubric + problem + whiteboard image
+  const prompt = buildGradingPrompt(rubric, problem);
+  
+  // 2. Call vision model with whiteboard image
+  const response = await openrouter.chat({
+    model: "anthropic/claude-sonnet-4",
+    messages: [
+      { role: "system", content: GRADING_SYSTEM_PROMPT },
+      { 
+        role: "user", 
+        content: [
+          { type: "text", text: prompt },
+          { type: "image_url", url: submission.whiteboard_data.image_url }
+        ]
+      },
+    ],
+    temperature: 0.1, // Low temp for consistent grading
+  });
+
+  // 3. Parse and validate response
+  const parsed = GradeResponseSchema.safeParse(JSON.parse(response.content));
+  if (!parsed.success) {
+    throw new Error("Invalid grade response format");
+  }
+
+  // 4. Store score
+  return insertScore({
+    submission_id: submission.id,
+    rubric_id: rubric.id,
+    points_earned: parsed.data.total_earned,
+    feedback: parsed.data.overall_feedback,
+  });
+}
+```
+
+---
+
+## State Management
+
+### Student Session
+
+- Store `student_id` in localStorage after name entry
+- Track `completed_problems[]` locally
+- On refresh: fetch existing submissions to restore state
+
+### Teacher Report
+
+- Server-rendered initial data (SSR)
+- Optional polling for live updates
+- All state persisted in Supabase — refresh recovers state

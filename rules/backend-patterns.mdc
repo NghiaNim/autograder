@@ -1,0 +1,231 @@
+# Backend Patterns
+
+## Architecture Layers
+
+```
+lib/
+├── actions/           # Direct DB/API calls
+│   └── *.actions.ts
+├── services/          # Orchestration layer
+│   └── *.service.ts
+├── schemas/           # Zod schemas + types
+│   └── *.schema.ts
+└── utils/             # Pure helpers
+    └── *.ts
+
+app/api/
+└── [resource]/
+    └── route.ts       # Thin API handlers
+```
+
+---
+
+## Layer Responsibilities
+
+### 1. Route Endpoints (`app/api/**/route.ts`)
+
+- Parse request
+- Call service
+- Return response
+- **No business logic**
+
+```ts
+// app/api/assignments/route.ts
+import { NextRequest, NextResponse } from "next/server";
+import { createAssignment } from "@/lib/services/assignment.service";
+import { CreateAssignmentSchema } from "@/lib/schemas/assignment.schema";
+
+export async function POST(req: NextRequest) {
+  const body = await req.json();
+  const parsed = CreateAssignmentSchema.safeParse(body);
+  
+  if (!parsed.success) {
+    return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
+  }
+  
+  const result = await createAssignment(parsed.data);
+  
+  if (result.error) {
+    return NextResponse.json({ error: result.error }, { status: result.status });
+  }
+  
+  return NextResponse.json(result.data, { status: 201 });
+}
+```
+
+---
+
+### 2. Services (`lib/services/*.service.ts`)
+
+- Orchestrate workflows
+- Call multiple actions
+- Handle business logic
+- **Never import other services**
+- **Never call DB/API directly**
+
+```ts
+// lib/services/assignment.service.ts
+import { insertAssignment, getAssignmentById } from "@/lib/actions/assignment.actions";
+import { generateRubric } from "@/lib/actions/llm.actions";
+import { CreateAssignmentInput } from "@/lib/schemas/assignment.schema";
+
+export async function createAssignment(input: CreateAssignmentInput) {
+  // 1. Create assignment record
+  const assignment = await insertAssignment(input);
+  if (assignment.error) return assignment;
+
+  // 2. Generate rubric via LLM
+  const rubric = await generateRubric(assignment.data);
+  if (rubric.error) return rubric;
+
+  // 3. Return combined result
+  return {
+    data: { ...assignment.data, rubric: rubric.data },
+    error: null,
+  };
+}
+```
+
+---
+
+### 3. Actions (`lib/actions/*.actions.ts`)
+
+- Direct Supabase queries
+- Direct OpenRouter calls
+- Single responsibility per function
+- **Never import services**
+- **Never call other actions** (except shared utils)
+
+```ts
+// lib/actions/assignment.actions.ts
+import { createServerClient } from "@/lib/supabase/server";
+import { Assignment, CreateAssignmentInput } from "@/lib/schemas/assignment.schema";
+
+export async function insertAssignment(input: CreateAssignmentInput) {
+  const supabase = await createServerClient();
+  
+  const { data, error } = await supabase
+    .from("assignments")
+    .insert(input)
+    .select()
+    .single();
+
+  if (error) {
+    return { data: null, error: error.message, status: 500 };
+  }
+
+  return { data: data as Assignment, error: null };
+}
+
+export async function getAssignmentById(id: string) {
+  const supabase = await createServerClient();
+  
+  const { data, error } = await supabase
+    .from("assignments")
+    .select("*, rubrics(*)")
+    .eq("id", id)
+    .single();
+
+  if (error) {
+    return { data: null, error: error.message, status: 404 };
+  }
+
+  return { data: data as Assignment, error: null };
+}
+```
+
+```ts
+// lib/actions/llm.actions.ts
+import { openrouter } from "@/lib/openrouter/client";
+import { RubricResponseSchema } from "@/lib/schemas/rubric.schema";
+
+export async function generateRubric(assignment: { title: string; description: string }) {
+  const response = await openrouter.chat({
+    model: "anthropic/claude-sonnet-4",
+    messages: [
+      { role: "system", content: RUBRIC_SYSTEM_PROMPT },
+      { role: "user", content: `Title: ${assignment.title}\n\n${assignment.description}` },
+    ],
+  });
+
+  const parsed = RubricResponseSchema.safeParse(JSON.parse(response.content));
+  
+  if (!parsed.success) {
+    return { data: null, error: "Invalid rubric format", status: 500 };
+  }
+
+  return { data: parsed.data, error: null };
+}
+```
+
+---
+
+### 4. Schemas (`lib/schemas/*.schema.ts`)
+
+- Zod schemas for validation
+- TypeScript types derived from schemas
+- Shared across all layers
+
+```ts
+// lib/schemas/assignment.schema.ts
+import { z } from "zod";
+
+export const AssignmentSchema = z.object({
+  id: z.string().uuid(),
+  title: z.string().min(1).max(200),
+  description: z.string(),
+  teacher_id: z.string().uuid(),
+  created_at: z.string().datetime(),
+});
+
+export const CreateAssignmentSchema = AssignmentSchema.omit({
+  id: true,
+  created_at: true,
+});
+
+export type Assignment = z.infer<typeof AssignmentSchema>;
+export type CreateAssignmentInput = z.infer<typeof CreateAssignmentSchema>;
+```
+
+---
+
+## Import Rules
+
+| From → To | Allowed? |
+|-----------|----------|
+| Route → Service | ✅ |
+| Route → Schema | ✅ |
+| Service → Action | ✅ |
+| Service → Schema | ✅ |
+| Action → Schema | ✅ |
+| Action → Service | ❌ |
+| Service → Service | ❌ |
+| Action → Action | ❌ (use shared utils) |
+
+---
+
+## Error Handling Pattern
+
+All actions/services return:
+
+```ts
+type Result<T> = 
+  | { data: T; error: null }
+  | { data: null; error: string; status: number };
+```
+
+- Never throw in actions/services
+- Routes convert errors to HTTP responses
+- Log errors at route level only
+
+---
+
+## File Naming
+
+| Type | Pattern | Example |
+|------|---------|---------|
+| Actions | `{resource}.actions.ts` | `assignment.actions.ts` |
+| Services | `{resource}.service.ts` | `assignment.service.ts` |
+| Schemas | `{resource}.schema.ts` | `assignment.schema.ts` |
+| Routes | `route.ts` in folder | `app/api/assignments/route.ts` |
+| Dynamic routes | `[param]/route.ts` | `app/api/assignments/[id]/route.ts` |

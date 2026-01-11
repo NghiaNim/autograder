@@ -17,7 +17,7 @@ export const AssignmentGenerationSchema = z.object({
   problems: z.array(
     z.object({
       question: z.string().describe("The problem/question for students to solve"),
-      hint: z.string().optional().describe("Optional hint for the problem"),
+      hint: z.string().nullable().describe("Optional hint for the problem, or null if none"),
     })
   ).length(5).describe("Exactly 5 problems/questions for students to solve"),
   rubric: z.object({

@@ -15,7 +15,7 @@ export const CriterionSchema = z.object({
 
 export const ProblemSchema = z.object({
   question: z.string(),
-  hint: z.string().optional(),
+  hint: z.string().nullable(),
 });
 
 export const RubricSchema = z.object({

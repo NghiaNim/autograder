@@ -42,6 +42,7 @@ export const AssignmentGenerationResponseSchema = z.object({
 
 export const UpdateRubricSchema = z.object({
   criteria: z.array(CriterionSchema),
+  problems: z.array(ProblemSchema).optional(),
   total_points: z.number().int().positive(),
 });
 

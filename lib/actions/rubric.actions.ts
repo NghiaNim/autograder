@@ -52,13 +52,19 @@ export async function updateRubric(
 ): Promise<Result<Rubric>> {
   const supabase = await createServerClient();
 
+  const updateData: Record<string, unknown> = {
+    criteria: input.criteria,
+    total_points: input.total_points,
+    updated_at: new Date().toISOString(),
+  };
+
+  if (input.problems) {
+    updateData.problems = input.problems;
+  }
+
   const { data, error } = await supabase
     .from("rubrics")
-    .update({
-      criteria: input.criteria,
-      total_points: input.total_points,
-      updated_at: new Date().toISOString(),
-    })
+    .update(updateData)
     .eq("assignment_id", assignmentId)
     .select()
     .single();
